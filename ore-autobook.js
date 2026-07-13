@@ -74,14 +74,14 @@ const CONFIG = {
   // Booking open time becomes testOffsetMinutes from script start so you can
   // watch keep-alive → pre-warm → snipe in real time.
   // MUST be false on the actual day (July 14).
-  testMode:             false,
+  testMode:             true,
   testOffsetMinutes:    2,                   // open 2 min from now when testing
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
   // Set mockMode: true to test against the local mock-portal.js server.
   // Run "node mock-portal.js" in a separate terminal first.
   // Works with testMode: true (3 min countdown) so you see the full flow.
-  mockMode:             false,
+  mockMode:             true,
   mockPort:             3000,
 };
 // ──────────────────────────────────────────────────────────────────────────────
@@ -178,14 +178,15 @@ async function triggerGridRefreshAndCheckBookButton(page, venueFilter) {
       const findBookLink = () => {
         let found = null;
 
-        // Primary: action-cell td — text 'Book' is the only reliable signal.
-        // We do NOT check the href URL pattern; GDC could change it without
-        // notice and the text label is what the user sees and trusts.
+        // Primary: action-cell td — exact text 'Book' or 'Book Now' (confirmed from portal).
+        // Do NOT use startsWith — 'Booked' also starts with 'book' and must not be clicked.
+        const BOOK_LABELS = ['Book', 'Book Now'];
         $('td.action-cell a').each(function () {
           if (found) return false;
           const $a   = $(this);
           const href = ($a.attr('href') || '').trim();
-          if ($a.text().trim() !== 'Book') return;  // exact case, no padding
+          const txt  = $a.text().trim();
+          if (!BOOK_LABELS.includes(txt)) return;    // exact match only
           if (!href) return;                         // must have an href
           if (venueFilter) {
             const venue = $a.closest('tr').find('td').eq(1).text().trim().toLowerCase();
@@ -313,7 +314,7 @@ async function reloadAndCheckBookButton(page, venueFilter, examsUrl) {
     document.querySelectorAll('td.action-cell a').forEach(a => {
       if (found) return;
       const href = (a.getAttribute('href') || '').trim();
-      if (a.textContent.trim() !== 'Book') return;  // exact case match
+      if (!['Book', 'Book Now'].includes(a.textContent.trim())) return;  // exact match only
       if (!href) return;
       if (vf) {
         const row = a.closest('tr');
@@ -346,7 +347,7 @@ async function confirmBooking(page, bookingHref) {
   // Screenshot taken concurrently while navigation loads (doesn't delay click).
   const clicked = await page.evaluate((href) => {
     const a = Array.from(document.querySelectorAll('td.action-cell a'))
-      .find(el => el.textContent.trim() === 'Book' && (el.getAttribute('href') || '').trim());
+      .find(el => ['Book', 'Book Now'].includes(el.textContent.trim()) && (el.getAttribute('href') || '').trim());
     if (a) { a.click(); return true; }
     return false;
   }, bookingHref).catch(() => false);
