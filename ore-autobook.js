@@ -10,8 +10,8 @@
  *             Full reload every 8 s. Renders the grid fresh so all portal
  *             JS is primed and the CSRF token is hot.
  *
- *  Phase 3  — Rapid snipe (14:29:45 → booked)
- *             Every 2 s we fire the portal's OWN grid-refresh event
+ *  Phase 3  — Rapid snipe (14:29:50 → booked)
+ *             Every 3 s we fire the portal's OWN grid-refresh event
  *             ($('.entity-grid').trigger('refresh')). This re-fetches only
  *             the grid data (~400 ms round-trip vs 3-5 s for a full reload)
  *             without re-parsing any JS/CSS. The instant a <a>Book</a> link
@@ -53,9 +53,9 @@ const CONFIG = {
   preWarmIntervalMs:    8_000,
 
   // Phase 3: rapid snipe starts this many seconds before open
-  snipeLeadSec:         15,                  // 14:29:45  → grid-refresh every 2 s
-  snipeIntervalMs:      2_000,               // 2 s between grid refreshes
-  snipeMaxAttempts:     300,                 // 300 × 2 s = 10 min max
+  snipeLeadSec:         10,                  // 14:29:50  → grid-refresh every 3 s
+  snipeIntervalMs:      3_000,               // 3 s between snipe attempts
+  snipeMaxAttempts:     300,                 // 300 × 3 s = 15 min max
 
   // After grid 'loaded' fires, portal JS makes 2 sequential AJAX calls before
   // injecting the Book button (~895 ms total). We poll every 100 ms until it
@@ -64,21 +64,31 @@ const CONFIG = {
   gridPollMaxMs:        8000,                // stop scanning after 8 s per refresh (handles 8x server overload)
 
   // Fire the FIRST snipe this many ms BEFORE 14:30:00 so the AJAX chain
-  // (400ms grid + 260ms waitingList + 235ms bookings = ~895ms) lands right AT
-  // 14:30:00. With <1ms ping this means Book button appears at ~14:30:00.005.
-  preFireMs:            900,                 // fire first snipe at 14:29:59.100
+  // lands right AT 14:30:00. Real portal AJAX measured at ~2000ms round-trip
+  // (entity-grid-data.json ~1500ms + waitingList ~260ms + bookings ~235ms).
+  // We fire 2200ms early so applyExamLogic runs right as 14:30:00 hits.
+  preFireMs:            1500,                // fire first snipe at 14:29:58.500
 
   // ── Test mode ─────────────────────────────────────────────────────────────
   // Set testMode: true to run a full end-to-end test RIGHT NOW.
   // Booking open time becomes testOffsetMinutes from script start so you can
   // watch keep-alive → pre-warm → snipe in real time.
   // MUST be false on the actual day (July 14).
-  testMode:             true,
-  testOffsetMinutes:    3,                   // open 3 min from now when testing
+  testMode:             false,
+  testOffsetMinutes:    2,                   // open 2 min from now when testing
+
+  // ── Mock mode ─────────────────────────────────────────────────────────────
+  // Set mockMode: true to test against the local mock-portal.js server.
+  // Run "node mock-portal.js" in a separate terminal first.
+  // Works with testMode: true (3 min countdown) so you see the full flow.
+  mockMode:             false,
+  mockPort:             3000,
 };
 // ──────────────────────────────────────────────────────────────────────────────
 
-const BASE_URL = 'https://mygdc.gdc-uk.org';
+const BASE_URL = CONFIG.mockMode
+  ? `http://localhost:${CONFIG.mockPort}`
+  : 'https://mygdc.gdc-uk.org';
 
 /** Simple sleep with optional random jitter */
 const sleep = (ms, jitter = 0) =>
@@ -99,7 +109,13 @@ function buildBookingOpenTime() {
   return new Date(y, m - 1, d, CONFIG.bookingOpenHour, CONFIG.bookingOpenMinute, 0, 0);
 }
 
-const ts = () => new Date().toLocaleTimeString('en-GB', { hour12: false, fractionalSecondDigits: 1 });
+const ts = () => {
+  const d = new Date();
+  return String(d.getHours()).padStart(2,'0') + ':' +
+         String(d.getMinutes()).padStart(2,'0') + ':' +
+         String(d.getSeconds()).padStart(2,'0') + '.' +
+         String(d.getMilliseconds()).padStart(3,'0');
+};
 
 // ─── LOGIN ─────────────────────────────────────────────────────────────────────
 
@@ -153,22 +169,24 @@ async function login(page) {
 async function triggerGridRefreshAndCheckBookButton(page, venueFilter) {
   return page.evaluate(({ venueFilter, pollMs, maxMs }) => {
     return new Promise((resolve) => {
-      if (typeof $ === 'undefined') return resolve(null);
+      if (typeof $ === 'undefined') return resolve({ href: null, ajaxMs: 0 });
 
       const $grid = $('#schedulelist .entity-grid');
-      if (!$grid.length) return resolve(null);
+      if (!$grid.length) return resolve({ href: null, ajaxMs: 0 });
 
       // ── Helper: scan the DOM right now for a visible Book link ───────────
       const findBookLink = () => {
         let found = null;
 
-        // Primary: action-cell td (exactly where the portal injects the link)
+        // Primary: action-cell td — text 'Book' is the only reliable signal.
+        // We do NOT check the href URL pattern; GDC could change it without
+        // notice and the text label is what the user sees and trusts.
         $('td.action-cell a').each(function () {
           if (found) return false;
           const $a   = $(this);
-          const href = $a.attr('href') || '';
-          if (!href.includes('booking-ore-exam')) return;
+          const href = ($a.attr('href') || '').trim();
           if ($a.text().trim() !== 'Book') return;  // exact case, no padding
+          if (!href) return;                         // must have an href
           if (venueFilter) {
             const venue = $a.closest('tr').find('td').eq(1).text().trim().toLowerCase();
             if (!venue.includes(venueFilter.toLowerCase())) return;
@@ -176,43 +194,102 @@ async function triggerGridRefreshAndCheckBookButton(page, venueFilter) {
           found = href.startsWith('http') ? href : 'https://mygdc.gdc-uk.org' + href;
         });
 
-        // Fallback: entire page (just in case portal changes structure)
-        if (!found) {
-          $('a').each(function () {
-            if (found) return false;
-            const $a   = $(this);
-            const href = $a.attr('href') || '';
-            if (!href.includes('booking-ore-exam')) return;
-            if ($a.text().trim() !== 'Book') return;
-            found = href.startsWith('http') ? href : 'https://mygdc.gdc-uk.org' + href;
-          });
-        }
-
         return found;
       };
 
-      let pollTimer   = null;
-      let safetyTimer = null;
+      let pollTimer        = null;
+      let safetyTimer      = null;
+      let applyExitTimer   = null;
+      let observer         = null;  // MutationObserver for instant detection
 
-      const finish = (href) => {
+      // Tracking whether tbody went empty then came back
+      // (signals the grid AJAX completed and applyExamLogic is now running)
+      let tbodyWentEmpty   = false;
+      let populatedAt      = null;
+      let triggerTime      = null;  // set just before trigger('refresh'), used to measure AJAX latency
+
+      const finish = (href, source) => {
         clearInterval(pollTimer);
         clearTimeout(safetyTimer);
-        resolve(href);
+        clearTimeout(applyExitTimer);
+        try { if (observer) observer.disconnect(); } catch(_) {}
+        // ajaxMs = time from trigger('refresh') to tbody repopulating.
+        // Returned to Node.js so the snipe loop can adapt the next-retry
+        // interval to actual server load.
+        const ajaxMs = (populatedAt && triggerTime) ? populatedAt - triggerTime : 0;
+        resolve({ href, ajaxMs, detectedBy: source || 'unknown' });
       };
 
-      // Start polling IMMEDIATELY — don't wait for 'loaded' event.
-      // applyExamLogic() injects the Book button into the DOM as soon as the
-      // AJAX chain completes, regardless of when 'loaded' fires relative to us.
-      // Polling from T=0 means we catch it within 100ms of it appearing,
-      // even if the server is slow and the chain takes 3-4s under load.
+      // MutationObserver: fires within 1-2ms of any DOM change under #schedulelist.
+      // The Book button is injected by applyExamLogic as a new <a> node inside the
+      // grid tbody — the observer catches it the instant it's written to the DOM,
+      // eliminating the up-to-100ms gap of the setInterval poll.
+      try {
+        observer = new MutationObserver(() => {
+          // Fix visibility whenever DOM changes under the grid
+          const g = document.querySelector('#schedulelist .entity-grid');
+          if (g && g.style.visibility === 'hidden' &&
+              document.querySelectorAll('#schedulelist .entity-grid tbody tr').length > 0) {
+            g.style.visibility = 'visible';
+          }
+          const href = findBookLink();
+          if (href) finish(href, 'MutationObserver');
+        });
+        observer.observe(
+          document.querySelector('#schedulelist') || document.body,
+          { childList: true, subtree: true, attributes: false }
+        );
+      } catch(_) {
+        observer = null;  // browser doesn't support it — setInterval takes over
+      }
+
+      // AJAX chain timing:
+      //   T=0       trigger('refresh') → tbody cleared immediately
+      //   T=~500ms  grid AJAX returns → tbody repopulated → 'loaded' fires
+      //   T=~800ms  applyExamLogic's 2 extra APIs return → Book button injected
+      //             — DOM is now frozen for this cycle —
+      //
+      // Smart exit: once we detect tbody repopulated (step 2), we start a
+      // 1200ms countdown for applyExamLogic to finish (step 3).  If the Book
+      // button hasn't appeared by then it won't appear this cycle — return null
+      // and retry immediately rather than spinning for the full 8s safety window.
+      //
+      // Also force visibility:visible on every tick (portal's revealExamOnce() only
+      // fires once per page load, so repeated refresh leaves the grid hidden).
+      // setInterval: backup poller + handles visibility fix + tracks tbody state
+      // for smart exit. MutationObserver handles the instant detection above.
       pollTimer = setInterval(() => {
+        const g        = document.querySelector('#schedulelist .entity-grid');
+        const rows     = document.querySelectorAll('#schedulelist .entity-grid tbody tr').length;
+        // realRows = rows with td.action-cell (real grid data, not the loading placeholder row)
+        const realRows = document.querySelectorAll('#schedulelist .entity-grid tbody td.action-cell').length;
+
+        // Restore visibility so the user can see the table (any row, including loading row)
+        if (g && g.style.visibility === 'hidden' && rows > 0) {
+          g.style.visibility = 'visible';
+        }
+
+        // Check for Book button immediately on every tick
         const href = findBookLink();
-        if (href) finish(href);
+        if (href) return finish(href, 'setInterval');
+
+        // Track tbody state using realRows so the loading placeholder doesn't count as
+        // 'populated' — only real grid data rows (with td.action-cell) trigger populatedAt.
+        // This is what was causing ajaxMs=0: the loading row kept rows>0 the whole time.
+        if (!realRows) {
+          tbodyWentEmpty = true;  // AJAX in-flight: real data not yet returned
+        } else if (tbodyWentEmpty && !populatedAt) {
+          // Real exam rows repopulated → grid AJAX done, applyExamLogic now running
+          populatedAt = Date.now();
+          // Give applyExamLogic 1200ms to call its 2 APIs and inject Book button
+          applyExitTimer = setTimeout(() => finish(findBookLink(), 'applyExitTimer'), 1200);
+        }
       }, pollMs);
 
-      // Hard timeout — give up and return null after maxMs
-      safetyTimer = setTimeout(() => finish(findBookLink()), maxMs);
+      // Hard safety timeout — fires if AJAX never completes (server hung)
+      safetyTimer = setTimeout(() => finish(findBookLink(), 'safetyTimer'), maxMs);
 
+      triggerTime = Date.now();
       $grid.trigger('refresh');
     });
   }, {
@@ -224,18 +301,20 @@ async function triggerGridRefreshAndCheckBookButton(page, venueFilter) {
 
 // ─── FULL PAGE RELOAD FALLBACK ────────────────────────────────────────────────
 
-async function reloadAndCheckBookButton(page, venueFilter) {
-  await page.goto(`${BASE_URL}/exams/`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+async function reloadAndCheckBookButton(page, venueFilter, examsUrl) {
+  const targetUrl = examsUrl || `${BASE_URL}/exams/`;
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
   // Wait for the portal spinner to clear (up to 12 s)
   await page.waitForFunction(() => !document.getElementById('exam-loading-spinner'), { timeout: 12000 }).catch(() => {});
   await sleep(500);
 
   const href = await page.evaluate((vf) => {
     let found = null;
-    // Primary: action-cell links (exactly how the portal injects the Book link)
     document.querySelectorAll('td.action-cell a').forEach(a => {
-      if (!(a.href || '').includes('booking-ore-exam')) return;
-      if (a.textContent.trim() !== 'Book') return;   // exact case match
+      if (found) return;
+      const href = (a.getAttribute('href') || '').trim();
+      if (a.textContent.trim() !== 'Book') return;  // exact case match
+      if (!href) return;
       if (vf) {
         const row = a.closest('tr');
         if (!row) return;
@@ -243,16 +322,8 @@ async function reloadAndCheckBookButton(page, venueFilter) {
         const venue = cells[1] ? cells[1].textContent.trim().toLowerCase() : '';
         if (!venue.includes(vf.toLowerCase())) return;
       }
-      found = a.href;
+      found = href.startsWith('http') ? href : 'https://mygdc.gdc-uk.org' + href;
     });
-    // Fallback: any link
-    if (!found) {
-      document.querySelectorAll('a').forEach(a => {
-        if (!(a.href || '').includes('booking-ore-exam')) return;
-        if (a.textContent.trim() !== 'Book') return;
-        found = a.href;
-      });
-    }
     return found;
   }, venueFilter || '');
 
@@ -262,9 +333,44 @@ async function reloadAndCheckBookButton(page, venueFilter) {
 // ─── BOOK THE EXAM ─────────────────────────────────────────────────────────────
 
 async function confirmBooking(page, bookingHref) {
+  console.log('');
+  console.log(`[${ts()}] ██████████████████████████████████████████████████`);
+  console.log(`[${ts()}] █                                                █`);
+  console.log(`[${ts()}] █   🎯  BOOK BUTTON FOUND — NAVIGATING NOW  🎯   █`);
+  console.log(`[${ts()}] █                                                █`);
+  console.log(`[${ts()}] ██████████████████████████████████████████████████`);
+  console.log('');
+
   console.log(`[${ts()}][book] → ${bookingHref}`);
-  await page.goto(bookingHref, { waitUntil: 'domcontentloaded', timeout: 20000 });
-  console.log(`[${ts()}][book] ✅  Booking page loaded – COMPLETE IT MANUALLY IN THE BROWSER NOW.`);
+  // Click the Book element immediately — minimum latency.
+  // Screenshot taken concurrently while navigation loads (doesn't delay click).
+  const clicked = await page.evaluate((href) => {
+    const a = Array.from(document.querySelectorAll('td.action-cell a'))
+      .find(el => el.textContent.trim() === 'Book' && (el.getAttribute('href') || '').trim());
+    if (a) { a.click(); return true; }
+    return false;
+  }, bookingHref).catch(() => false);
+
+  if (clicked) {
+    console.log(`[${ts()}][book] Clicked Book element directly ✓`);
+    // Start waiting for navigation, take screenshot in parallel while page loads
+    const navPromise = page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
+    await page.screenshot({ path: 'book-button-found.png', fullPage: false }).catch(() => {});
+    console.log(`[${ts()}][book] 📸 Screenshot saved → book-button-found.png`);
+    await navPromise;
+  } else {
+    console.log(`[${ts()}][book] Element gone — navigating via href directly`);
+    await page.goto(bookingHref, { waitUntil: 'load', timeout: 30000 });
+    await page.screenshot({ path: 'book-button-found.png', fullPage: false }).catch(() => {});
+  }
+  console.log('');
+  console.log(`[${ts()}] ████████████████████████████████████████████████████████`);
+  console.log(`[${ts()}] █                                                      █`);
+  console.log(`[${ts()}] █   ✅  BOOKING PAGE LOADED — COMPLETE THE FORM NOW!  █`);
+  console.log(`[${ts()}] █   Fill in all fields and click Confirm/Submit ASAP   █`);
+  console.log(`[${ts()}] █                                                      █`);
+  console.log(`[${ts()}] ████████████████████████████████████████████████████████`);
+  console.log('');
   return true;
 }
 
@@ -274,6 +380,19 @@ async function main() {
   const openTime    = buildBookingOpenTime();
   const preWarmTime = new Date(openTime.getTime() - CONFIG.preWarmLeadSec  * 1000);
   const snipeTime   = new Date(openTime.getTime() - CONFIG.snipeLeadSec    * 1000);
+
+  // ── Startup warnings ─────────────────────────────────────────────────────
+  if (CONFIG.testMode) {
+    console.log('');
+    console.log(`[${ts()}] ‼️  ‼️  ‼️  WARNING: testMode is TRUE  ‼️  ‼️  ‼️`);
+    console.log(`[${ts()}] ‼️  Booking time = NOW + ${CONFIG.testOffsetMinutes} min  (NOT July 14 14:30)`);
+    console.log(`[${ts()}] ‼️  SET testMode: false BEFORE RUNNING ON JULY 14  ‼️`);
+    console.log('');
+  }
+  if (CONFIG.mockMode) {
+    console.log(`[${ts()}] 🧪 MOCK MODE — targeting http://localhost:${CONFIG.mockPort}`);
+    console.log(`[${ts()}] 🧪 Make sure "node mock-portal.js" is running in another terminal.`);
+  }
 
   console.log(`[${ts()}] Booking opens : ${openTime.toLocaleString('en-GB')}`);
   console.log(`[${ts()}] Pre-warm start: ${preWarmTime.toLocaleTimeString('en-GB')} (full reload every ${CONFIG.preWarmIntervalMs/1000}s)`);
@@ -304,11 +423,16 @@ async function main() {
 
   const page = await context.newPage();
 
-  // ── STEP 1: Manual login ──────────────────────────────────────────────────
-  await page.goto(`${BASE_URL}/exams/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // ── STEP 1: Login / navigate to exams page ─────────────────────────────
+  // In mockMode: navigate straight to mock server (no login needed).
+  // In real mode: navigate to portal; wait for manual login + MFA if needed.
+  const examsUrl = CONFIG.mockMode
+    ? `${BASE_URL}/exams/?opensAt=${openTime.getTime()}`
+    : `${BASE_URL}/exams/`;
 
-  // If redirected to login page, wait for the user to log in manually
-  if (!page.url().includes('mygdc.gdc-uk.org/exams')) {
+  await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+  if (!CONFIG.mockMode && !page.url().includes('mygdc.gdc-uk.org/exams')) {
     console.log(``);
     console.log(`[${ts()}] ⚠️  NOT LOGGED IN — please log in manually in the browser window.`);
     console.log(`[${ts()}]    1. Enter your email and password`);
@@ -318,7 +442,6 @@ async function main() {
     try {
       await page.waitForURL(`**mygdc.gdc-uk.org/exams**`, { timeout: 300_000 });
     } catch (_) {
-      // If still not on exams page after 5 min, check again before giving up
       if (!page.url().includes('mygdc.gdc-uk.org/exams')) {
         console.log(`[${ts()}] ⚠️  Still not on exams page — check the browser window.`);
         await page.waitForURL(`**mygdc.gdc-uk.org/exams**`, { timeout: 300_000 });
@@ -328,103 +451,255 @@ async function main() {
 
   await page.waitForFunction(() => !document.getElementById('exam-loading-spinner'), { timeout: 15000 }).catch(() => {});
   console.log(`[${ts()}] ✅ On exams page. Waiting for pre-warm phase...`);
-  console.log(`[${ts()}] ⚡ IMPORTANT: Keep this laptop plugged in and screen/sleep disabled until after 14:30 tomorrow.`);
+  if (!CONFIG.mockMode) {
+    console.log(`[${ts()}] ⚡ IMPORTANT: Keep this laptop plugged in and screen/sleep disabled until after 14:30 tomorrow.`);
+  }
 
-  // ── STEP 2: Keep-alive – grid refresh every 10 s until pre-warm ─────────────
-  // Light-touch: fire the portal's own grid refresh AJAX every 10 s instead of
-  // a full page reload. This sends one POST request, keeps the session warm,
-  // and leaves the existing table rows untouched if the call fails or returns
-  // nothing. Every 5 minutes we also do a full page reload to renew cookies.
+  // ── Clock accuracy check (real mode only) ────────────────────────────────
+  if (!CONFIG.mockMode) {
+    const clockDrift = await page.evaluate(async () => {
+      try {
+        const r = await fetch('https://mygdc.gdc-uk.org/', { method: 'HEAD', cache: 'no-cache' });
+        const serverTime = new Date(r.headers.get('date') || '').getTime();
+        return isNaN(serverTime) ? null : Date.now() - serverTime;
+      } catch(_) { return null; }
+    }).catch(() => null);
+    if (clockDrift !== null) {
+      const driftSec = (clockDrift / 1000).toFixed(1);
+      if (Math.abs(clockDrift) > 2000) {
+        process.stdout.write('\x07\x07');
+        console.log(`[${ts()}] ⚠️  CLOCK DRIFT: your clock is ${driftSec}s ${clockDrift > 0 ? 'AHEAD of' : 'BEHIND'} the server!`);
+        console.log(`[${ts()}] ⚠️  Go to: Settings → Time & Language → Sync now — then restart this script.`);
+      } else {
+        console.log(`[${ts()}] ✅ Clock check: ${driftSec}s drift from server (OK)`);
+      }
+    }
+  }
+
+  // ── STEP 2: Keep-alive – alternating full reload / grid refresh every 30 s ──
+  // Odd  cycles: full page reload  → keeps session alive, re-binds jQuery/CSRF
+  // Even cycles: grid refresh only → cheaper on server, still keeps page warm
+  // Session expiry always forces a full reload regardless of cycle.
   let kaCounter = 0;
+  let kaFullReload = true;  // start with a full reload
   while (true) {
-    const waitMs = Math.min(10_000, msUntil(preWarmTime) - 5000);
+    const waitMs = Math.min(CONFIG.keepAliveIntervalMs, msUntil(preWarmTime) - 5000);
     if (waitMs <= 0) break;
     await sleep(waitMs);
     if (msUntil(preWarmTime) <= 0) break;
 
     kaCounter++;
     const minsLeft = Math.ceil(msUntil(preWarmTime) / 60_000);
+    const onExamsPage = CONFIG.mockMode || page.url().includes('mygdc.gdc-uk.org/exams');
 
-    if (kaCounter % 30 === 0) {
-      // Every ~5 min: full reload to renew session cookies / CSRF token
-      console.log(`[${ts()}] [keep-alive #${kaCounter}] Full reload (session renew, ~${minsLeft}m to pre-warm)...`);
+    if (kaFullReload || !onExamsPage) {
+      // ── Full reload cycle (or forced reload due to session expiry) ──────
+      console.log(`[${ts()}] [keep-alive #${kaCounter}] Full reload (~${minsLeft}m to pre-warm)...`);
       await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
       await page.waitForFunction(() => !document.getElementById('exam-loading-spinner'), { timeout: 10000 }).catch(() => {});
+
+      // ── Session expiry check (real mode only) ──────────────────────────
+      if (!CONFIG.mockMode && !page.url().includes('mygdc.gdc-uk.org/exams')) {
+        process.stdout.write('\x07\x07\x07');
+        console.log('');
+        console.log(`[${ts()}] 🚨🚨🚨 SESSION EXPIRED — redirected to: ${page.url()}`);
+        console.log(`[${ts()}] 🚨  LOG IN AGAIN IN THE BROWSER WINDOW NOW.`);
+        console.log(`[${ts()}] 🚨  Script will auto-resume once you reach the exams page.`);
+        console.log('');
+        await page.waitForURL('**mygdc.gdc-uk.org/exams**', { timeout: 1_800_000 })
+          .catch(() => {});
+        await page.waitForFunction(() => !document.getElementById('exam-loading-spinner'), { timeout: 15000 }).catch(() => {});
+        console.log(`[${ts()}] ✅ Re-logged in. Keep-alive resuming...`);
+        kaFullReload = true;  // force full reload again next cycle after re-login
+        continue;
+      } else {
+        console.log(`[${ts()}] [keep-alive #${kaCounter}] Full reload ✓ (~${minsLeft}m to pre-warm)`);
+      }
     } else {
-      // Lightweight grid refresh — if it fails, original rows are untouched
-      const ok = await page.evaluate(() => {
-        try {
-          if (typeof $ === 'undefined') return false;
-          const $g = $('#schedulelist .entity-grid');
-          if (!$g.length) return false;
-          $g.trigger('refresh');
-          return true;
-        } catch (_) { return false; }
-      }).catch(() => false);
-      console.log(`[${ts()}] [keep-alive #${kaCounter}] Grid ${ok ? 'refreshed ✓' : 'refresh skipped — rows kept'} (~${minsLeft}m to pre-warm)`);
+      // ── Grid refresh cycle ─────────────────────────────────────────────
+      console.log(`[${ts()}] [keep-alive #${kaCounter}] Grid refresh (~${minsLeft}m to pre-warm)...`);
+      await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 5000 }).catch(() => {});
+      const kaProbe = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment)
+        .catch(() => ({ href: null, ajaxMs: 0 }));
+      console.log(`[${ts()}] [keep-alive #${kaCounter}] Grid refresh ✓ (AJAX: ${kaProbe.ajaxMs}ms, ~${minsLeft}m to pre-warm)`);
+      if (kaProbe.href) {
+        console.log(`[${ts()}] [keep-alive #${kaCounter}] 📡 Book button detected by: ${kaProbe.detectedBy}`);
+        console.log(`[${ts()}] [keep-alive #${kaCounter}] ⚡ BOOK BUTTON VISIBLE — skipping to pre-warm immediately!`);
+        break;
+      }
     }
+
+    kaFullReload = !kaFullReload;  // toggle: reload → refresh → reload → ...
   }
+
+  // measuredChainMs: rolling max of (AJAX #1 grid-data) + 1200ms (AJAXes #2+#3)
+  // updated on every pre-warm cycle and on the final pre-snipe probe.
+  let measuredChainMs = 0;
 
   // Wait for the exact pre-warm start time
   if (msUntil(preWarmTime) > 0) await sleep(msUntil(preWarmTime));
 
-  // ── STEP 3: Pre-warm – full reload every 8 s until snipe phase ────────────
-  console.log(`[${ts()}] ── PRE-WARM phase (full reloads every ${CONFIG.preWarmIntervalMs/1000}s) ──`);
+  // ── STEP 3: Pre-warm – alternating full reload / grid refresh every 8 s ──
+  // Odd  cycles: full page reload  → re-binds jQuery, refreshes CSRF token
+  // Even cycles: grid refresh only → measures AJAX chain, cheaper on server
+  // Both cycles: probe for early Book button + measure AJAX chain timing
+  console.log(`[${ts()}] ── PRE-WARM phase (alternating full reload / grid refresh every ${CONFIG.preWarmIntervalMs/1000}s) ──`);
+  let preWarmFullReload = true;  // start with a full reload
   while (msUntil(snipeTime) > 0) {
-    console.log(`[${ts()}] [pre-warm] Reloading (${Math.round(msUntil(openTime)/1000)}s until open)...`);
-    await page.goto(`${BASE_URL}/exams/`, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await sleep(1500, 200);
+    if (preWarmFullReload) {
+      console.log(`[${ts()}] [pre-warm] Full page reload (${Math.round(msUntil(openTime)/1000)}s until open)...`);
+      await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      // Wait for jQuery + grid to initialise after the full reload
+      await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 8000 }).catch(() => {});
+    } else {
+      console.log(`[${ts()}] [pre-warm] Grid refresh only (${Math.round(msUntil(openTime)/1000)}s until open)...`);
+      // Ensure jQuery is still bound before firing the grid refresh
+      await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 5000 }).catch(() => {});
+    }
 
+    // Every cycle: probe the grid (measures 3-AJAX chain + checks for early Book button)
+    //   AJAX #1  entity-grid-data.json  → tbody repopulated  (= ajaxMs)
+    //   AJAX #2  /_api/gdc_waitinglists  → inside applyExamLogic
+    //   AJAX #3  /_api/new_exambookings  → inside applyExamLogic
+    const probe = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment);
+    if (probe.ajaxMs > 0) {
+      const chainMs = probe.ajaxMs + 1200;  // AJAX #1 measured + #2+#3 budget
+      if (chainMs > measuredChainMs) measuredChainMs = chainMs;
+      console.log(`[${ts()}] [pre-warm] 3-AJAX chain ~${chainMs}ms → preFireMs will be ${measuredChainMs}ms`);
+    } else {
+      console.log(`[${ts()}] [pre-warm] AJAX timing not captured this cycle`);
+    }
+
+    if (probe.href) {
+      console.log(`[${ts()}] [pre-warm] 📡 Book button detected by: ${probe.detectedBy}`);
+      console.log(`[${ts()}] [pre-warm] ⚡ BOOK BUTTON ALREADY VISIBLE — jumping to snipe phase!`);
+      break;
+    }
+
+    preWarmFullReload = !preWarmFullReload;  // toggle: reload → refresh → reload → ...
     const wait = Math.min(CONFIG.preWarmIntervalMs, msUntil(snipeTime));
     if (wait > 500) await sleep(wait);
   }
 
   // Final reload to ensure page + jQuery are fully initialised before snipe
   console.log(`[${ts()}] Final pre-snipe full reload...`);
-  await page.goto(`${BASE_URL}/exams/`, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+  await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
   await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 10000 }).catch(() => {});
-  console.log(`[${ts()}] jQuery + grid confirmed ready ✓`);
 
-  // Fire the first snipe preFireMs BEFORE 14:30:00 so that the AJAX chain
-  // inside applyExamLogic (~895 ms: grid+waitingList+bookings) completes right
-  // at 14:30:00 — when `now >= bookingStart` becomes true client-side.
-  //
-  // Timeline of first snipe (assuming <1ms ping, fired at 14:29:59.100):
-  //   14:29:59.100  trigger('refresh') sent
-  //   14:29:59.500  grid data returns, 'loaded' fires
-  //   14:29:59.760  waitingList AJAX returns
-  //   14:30:00.000  bookings AJAX returns → applyExamLogic checks now >= 14:30:00 ✓
-  //   14:30:00.010  100ms poller catches Book button
-  //   14:30:00.010  navigate to booking page
-  const firstFireTime = new Date(openTime.getTime() - CONFIG.preFireMs);
-  if (msUntil(firstFireTime) > 0) {
-    console.log(`[${ts()}] Waiting ${(msUntil(firstFireTime)/1000).toFixed(1)}s → pre-fire at ${firstFireTime.toLocaleTimeString('en-GB')} (${CONFIG.preFireMs}ms before open)...`);
-    await sleep(msUntil(firstFireTime));
-  }
-
-  // ── STEP 4: RAPID SNIPE ───────────────────────────────────────────────────
-  console.log(`[${ts()}] ══ SNIPE START (${CONFIG.preFireMs}ms pre-fire) ══`);
+  // Final pre-snipe probe: one more grid refresh right before the snipe phase.
+  // This gives the freshest possible 3-AJAX chain measurement and confirms
+  // jQuery event handlers are still bound. Also handles the rare case where
+  // the portal opens slightly early.
   let booked = false;
   let fullReloadFallback = false;
 
-  for (let i = 1; i <= CONFIG.snipeMaxAttempts; i++) {
+  const finalProbe = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment)
+    .catch(() => ({ href: null, ajaxMs: 0 }));
+  if (finalProbe.ajaxMs > 0) {
+    const chainMs = finalProbe.ajaxMs + 1200;
+    if (chainMs > measuredChainMs) measuredChainMs = chainMs;
+    console.log(`[${ts()}] ✅ AJAX chain confirmed (AJAX #1: ${finalProbe.ajaxMs}ms, full chain est. ${chainMs}ms)`);
+  } else {
+    // Chain didn't fire — reload one more time to re-bind handlers
+    console.log(`[${ts()}] ⚠️  AJAX chain not detected — doing extra reload to re-bind JS handlers...`);
+    await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 10000 }).catch(() => {});
+    console.log(`[${ts()}] ✅ Extra reload done — proceeding to snipe`);
+  }
+  if (finalProbe.href && !booked) {
+    console.log(`[${ts()}] [final-probe] 📡 Book button detected by: ${finalProbe.detectedBy}`);
+    console.log(`[${ts()}] [final-probe] ⚡ BOOK BUTTON VISIBLE — booking immediately!`);
+    booked = await confirmBooking(page, finalProbe.href);
+  }
+
+  // Dynamic preFireMs: fire trigger exactly measuredChainMs before 14:30:00
+  // so applyExamLogic runs and checks Date.now() AT 14:30:00 (not before it).
+  //
+  // NO +200ms buffer — a positive buffer means the chain completes BEFORE
+  // 14:30:00, applyExamLogic finds Date.now() < bookingStart, injects nothing,
+  // and we waste the entire first snipe cycle.
+  //
+  // Variability is handled by the smart re-fire in the snipe loop:
+  //   if chain was slightly faster (completed at 14:29:59.9) → snipe returns null
+  //   → sleep only until openTime+100ms → snipe #2 fires 100ms after open
+  //   if chain was slightly slower (completed at 14:30:00.1) → button injected ✔
+  //
+  // Timeline (example: measuredChainMs=1700ms):
+  //   14:29:58.300  trigger sent — AJAX #1 (grid-data) starts
+  //   14:29:58.800  AJAX #1 returns (ajaxMs~500ms) — AJAXes #2+#3 start
+  //   14:30:00.000  AJAXes #2+#3 return — applyExamLogic: Date.now() ≥ 14:30:00 ✔
+  //   14:30:00.000  Book button injected into DOM
+  //   14:30:00.100  100ms poller catches it → navigate to booking page
+  //
+  const dynamicPreFireMs = measuredChainMs > 0
+    ? Math.min(5000, Math.max(CONFIG.preFireMs, measuredChainMs))
+    : CONFIG.preFireMs;
+  console.log(`[${ts()}] ⏱  preFireMs: ${dynamicPreFireMs}ms (measured chain: ${measuredChainMs || 'n/a'}ms, config fallback: ${CONFIG.preFireMs}ms)`);
+  const firstFireTime = new Date(openTime.getTime() - dynamicPreFireMs);
+  // Light grid refreshes every 3s until 9s before firstFireTime.
+  // Exit with enough headroom for one full reload + one grid refresh below.
+  while (!booked && msUntil(firstFireTime) > 9000) {
+    const gap = msUntil(firstFireTime);
+    console.log(`[${ts()}] [pre-fire wait] ${(gap/1000).toFixed(1)}s to go — keeping grid warm...`);
+    await page.evaluate(() => {
+      try { if (typeof $ !== 'undefined') $('#schedulelist .entity-grid').trigger('refresh'); } catch(_) {}
+    }).catch(() => {});
+    await sleep(Math.min(3000, msUntil(firstFireTime) - 9000));
+  }
+
+  // One full page reload + one grid refresh right before the snipe window.
+  // Only runs if there is enough headroom (>9s to firstFireTime) — a full
+  // goto() takes ~3-4s and the probe ~2s, so 9s is the minimum safe buffer.
+  // With snipeLeadSec=10 and typical dynamicPreFireMs 1500-2500ms this block
+  // is usually skipped (only ~3-7s remain at this point) and we go straight
+  // to the wait. It kicks in when dynamicPreFireMs is large (slow server day).
+  if (!booked && msUntil(firstFireTime) > 9000) {
+    console.log(`[${ts()}] [pre-snipe] Final page reload + grid refresh (~${Math.round(msUntil(firstFireTime)/1000)}s to first snipe trigger)...`);
+    await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 8000 }).catch(() => {});
+    const preSnipeWarm = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment)
+      .catch(() => ({ href: null, ajaxMs: 0 }));
+    if (preSnipeWarm.ajaxMs > 0) {
+      const chainMs = preSnipeWarm.ajaxMs + 1200;
+      if (chainMs > measuredChainMs) measuredChainMs = chainMs;
+      console.log(`[${ts()}] [pre-snipe] AJAX chain ~${chainMs}ms → updated measuredChainMs: ${measuredChainMs}ms`);
+    }
+    if (preSnipeWarm.href) {
+      console.log(`[${ts()}] [pre-snipe] 📡 Book button detected by: ${preSnipeWarm.detectedBy}`);
+      console.log(`[${ts()}] [pre-snipe] ⚡ BOOK BUTTON FOUND — booking immediately, no further refreshes!`);
+      booked = await confirmBooking(page, preSnipeWarm.href);
+    }
+  } else {
+    console.log(`[${ts()}] [pre-snipe] Skipping extra reload — only ${Math.round(msUntil(firstFireTime)/1000)}s to first snipe (page already primed from finalProbe)`);
+  }
+
+  // Wait remaining time until the exact first-fire moment (skipped if already booked)
+  if (!booked && msUntil(firstFireTime) > 0) await sleep(msUntil(firstFireTime));
+
+  // ── STEP 4: RAPID SNIPE ───────────────────────────────────────────────────
+  if (!booked) console.log(`[${ts()}] ══ SNIPE START (${CONFIG.preFireMs}ms pre-fire) ══`);
+
+  for (let i = 1; !booked && i <= CONFIG.snipeMaxAttempts; i++) {
     const t0 = Date.now();
     console.log(`[${ts()}] [snipe #${i}] firing grid refresh...`);
+
+    let lastAjaxMs = 0;
 
     try {
       let bookHref = null;
 
       if (!fullReloadFallback) {
-        // Fast path: trigger portal's grid refresh event (no full page reload)
-        bookHref = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment);
-        if (bookHref === null && i % 2 === 0) {
-          // Every 2nd attempt also do a full reload — covers the case where the
-          // portal only injects the Book button on a full page load, not grid refresh
-          console.log(`[${ts()}] [snipe #${i}] Safety full reload...`);
-          bookHref = await reloadAndCheckBookButton(page, CONFIG.targetVenueFragment);
-        }
+        // Grid refresh is sufficient — applyExamLogic fires after trigger('refresh')
+        // exactly the same as after a full page load (confirmed on real portal).
+        // No full reload needed before clicking Book.
+        const result = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment);
+        bookHref  = result.href;
+        lastAjaxMs = result.ajaxMs;
+        if (lastAjaxMs) console.log(`[${ts()}] [snipe #${i}] grid AJAX took ${lastAjaxMs}ms`);
+        if (result.href) console.log(`[${ts()}] [snipe #${i}] 📡 Book button detected by: ${result.detectedBy}`);
       } else {
-        bookHref = await reloadAndCheckBookButton(page, CONFIG.targetVenueFragment);
+        bookHref = await reloadAndCheckBookButton(page, CONFIG.targetVenueFragment, examsUrl);
+        if (bookHref) console.log(`[${ts()}] [snipe #${i}] 📡 Book button detected by: full-page-reload`);
       }
 
       if (bookHref) {
@@ -442,11 +717,34 @@ async function main() {
     }
 
     if (!booked && i < CONFIG.snipeMaxAttempts) {
-      // 2 s between snipes, minus time already spent this iteration
-      // Small random jitter (±200ms) makes the interval look human-like
-      const elapsed = Date.now() - t0;
-      const remaining = Math.max(0, CONFIG.snipeIntervalMs - elapsed);
-      await sleep(remaining, 200);
+      const msToOpen  = msUntil(openTime);
+      const elapsed   = Date.now() - t0;
+
+      // Smart re-fire: if we're within ±3s of open time, the chain likely
+      // completed just before 14:30:00 (applyExamLogic check failed by <200ms).
+      // Don't wait the full dynamic interval — sleep only until openTime+100ms
+      // so the next trigger fires as close to open as possible.
+      if (msToOpen > -3000 && msToOpen < CONFIG.snipeIntervalMs) {
+        const wait = Math.max(0, msToOpen + 100);  // wait until 100ms past open
+        if (wait > 0)
+          console.log(`[${ts()}] [snipe #${i}] near open time — re-firing in ${wait}ms (${(msToOpen/1000).toFixed(2)}s to open)`);
+        else
+          console.log(`[${ts()}] [snipe #${i}] past open time — re-firing immediately`);
+        await sleep(wait);  // no jitter — exact timing matters here
+      } else {
+        // Away from open time: use dynamic interval based on server load
+        //   base 3s, extended when AJAX is slow so we don't spam an overloaded server
+        //   ajaxMs=0   (no data / fallback path)  → 3000ms
+        //   ajaxMs=500 (fast)                     → 3000ms
+        //   ajaxMs=1000                           → 3200ms
+        //   ajaxMs=2000 (moderate load)           → 4200ms
+        //   ajaxMs=3000+ (heavy load)             → 5000ms (capped)
+        const lastAjaxMsSafe = lastAjaxMs || 0;
+        const dynamicIntervalMs = Math.min(5000, CONFIG.snipeIntervalMs + Math.max(0, lastAjaxMsSafe - 800));
+        const remaining = Math.max(0, dynamicIntervalMs - elapsed);
+        if (remaining > 0) console.log(`[${ts()}] [snipe #${i}] next retry in ${remaining}ms (dynamic: ${dynamicIntervalMs}ms, AJAX: ${lastAjaxMsSafe}ms)`);
+        await sleep(remaining, 200);  // small jitter ±200ms
+      }
     }
   }
 
@@ -459,8 +757,8 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error('[fatal]', err.message);
-  console.log('[fatal] Script crashed but browser is kept open. Press Ctrl+C to exit.');
+  console.error(`[${ts()}][fatal]`, err.message);
+  console.log(`[${ts()}][fatal] Script crashed but browser is kept open. Press Ctrl+C to exit.`);
   // Do NOT call process.exit — keep Chrome open so you can see the booking page
   return new Promise(() => {});
 });
