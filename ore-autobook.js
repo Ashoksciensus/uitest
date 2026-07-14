@@ -35,8 +35,8 @@ const CONFIG = {
 
   // Booking window opens on this date at 14:30 London BST (UTC+1)
   bookingOpenDate:   '2026-07-14',           // YYYY-MM-DD
-  bookingOpenHour:   14,
-  bookingOpenMinute: 30,
+  bookingOpenHour:   15,
+  bookingOpenMinute: 0,
 
   // Target exam filters (matched case-insensitively against the grid)
   // Venue column shows the exam centre name e.g. "UCL Consultants Ltd" — NOT
@@ -262,8 +262,14 @@ async function triggerGridRefreshAndCheckBookButton(page, venueFilter) {
       pollTimer = setInterval(() => {
         const g        = document.querySelector('#schedulelist .entity-grid');
         const rows     = document.querySelectorAll('#schedulelist .entity-grid tbody tr').length;
-        // realRows = rows with td.action-cell (real grid data, not the loading placeholder row)
-        const realRows = document.querySelectorAll('#schedulelist .entity-grid tbody td.action-cell').length;
+        // realRows = rows that have real data columns (not the loading placeholder).
+        // The loading placeholder is: <tr><td colspan="6">Loading...</td></tr>
+        // Real exam rows have multiple <td> cells with no colspan attribute.
+        // We CANNOT use td.action-cell here because that only exists after
+        // applyExamLogic runs at 14:30 — before that it's always 0, breaking timing.
+        const realRows = document.querySelectorAll(
+          '#schedulelist .entity-grid tbody td:not([colspan])'
+        ).length;
 
         // Restore visibility so the user can see the table (any row, including loading row)
         if (g && g.style.visibility === 'hidden' && rows > 0) {
