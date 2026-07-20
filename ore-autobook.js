@@ -30,8 +30,8 @@ const { chromium } = require('playwright');
 
 // ─── CONFIGURATION ────────────────────────────────────────────────────────────
 const CONFIG = {
-  email:    'sheetaladdala@gmail.com',
-  password: 'Vedh@2905',            // ← fill in before running
+  email:    '',
+  password: '',            // ← fill in before running
 
   // Booking window opens on this date at 14:30 London BST (UTC+1)
   bookingOpenDate:   '2026-07-21',           // YYYY-MM-DD  ← UPDATE THIS for each booking window
