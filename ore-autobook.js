@@ -34,9 +34,9 @@ const CONFIG = {
   password: 'Vedh@2905',            // ← fill in before running
 
   // Booking window opens on this date at 14:30 London BST (UTC+1)
-  bookingOpenDate:   '2026-07-14',           // YYYY-MM-DD
-  bookingOpenHour:   15,
-  bookingOpenMinute: 0,
+  bookingOpenDate:   '2026-07-21',           // YYYY-MM-DD  ← UPDATE THIS for each booking window
+  bookingOpenHour:   14,
+  bookingOpenMinute: 30,
 
   // Target exam filters (matched case-insensitively against the grid)
   // Venue column shows the exam centre name e.g. "UCL Consultants Ltd" — NOT
@@ -74,14 +74,14 @@ const CONFIG = {
   // Booking open time becomes testOffsetMinutes from script start so you can
   // watch keep-alive → pre-warm → snipe in real time.
   // MUST be false on the actual day (July 14).
-  testMode:             true,
+  testMode:             false,
   testOffsetMinutes:    2,                   // open 2 min from now when testing
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
   // Set mockMode: true to test against the local mock-portal.js server.
   // Run "node mock-portal.js" in a separate terminal first.
   // Works with testMode: true (3 min countdown) so you see the full flow.
-  mockMode:             true,
+  mockMode:             false,
   mockPort:             3000,
 };
 // ──────────────────────────────────────────────────────────────────────────────
@@ -539,9 +539,10 @@ async function main() {
     kaFullReload = !kaFullReload;  // toggle: reload → refresh → reload → ...
   }
 
-  // measuredChainMs: rolling max of (AJAX #1 grid-data) + 1200ms (AJAXes #2+#3)
-  // updated on every pre-warm cycle and on the final pre-snipe probe.
-  let measuredChainMs = 0;
+  // gridRefreshSamples: circular buffer of last 3 grid-refresh-only chain timings.
+  // We average them for preFireMs — more stable than max (a single spike no longer
+  // dominates), and more recent than a global max (decays after a burst of slow cycles).
+  const gridRefreshSamples = [];  // max length 3, FIFO
 
   // Wait for the exact pre-warm start time
   if (msUntil(preWarmTime) > 0) await sleep(msUntil(preWarmTime));
@@ -571,8 +572,17 @@ async function main() {
     const probe = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment);
     if (probe.ajaxMs > 0) {
       const chainMs = probe.ajaxMs + 1200;  // AJAX #1 measured + #2+#3 budget
-      if (chainMs > measuredChainMs) measuredChainMs = chainMs;
-      console.log(`[${ts()}] [pre-warm] 3-AJAX chain ~${chainMs}ms → preFireMs will be ${measuredChainMs}ms`);
+      // Only update measuredChainMs from grid-refresh cycles (preWarmFullReload=false).
+      // Full page reload includes page-parse time and inflates the chain estimate,
+      // causing the snipe trigger to fire too early (chain completes before 14:30).
+      if (!preWarmFullReload) {
+        gridRefreshSamples.push(chainMs);
+        if (gridRefreshSamples.length > 3) gridRefreshSamples.shift();  // keep last 3
+        const avg = Math.round(gridRefreshSamples.reduce((a, b) => a + b, 0) / gridRefreshSamples.length);
+        console.log(`[${ts()}] [pre-warm] 3-AJAX chain ~${chainMs}ms (grid refresh) → samples=[${gridRefreshSamples.join(',')}] avg=${avg}ms`);
+      } else {
+        console.log(`[${ts()}] [pre-warm] 3-AJAX chain ~${chainMs}ms (full reload — excluded from calibration)`);
+      }
     } else {
       console.log(`[${ts()}] [pre-warm] AJAX timing not captured this cycle`);
     }
@@ -588,35 +598,47 @@ async function main() {
     if (wait > 500) await sleep(wait);
   }
 
-  // Final reload to ensure page + jQuery are fully initialised before snipe
-  console.log(`[${ts()}] Final pre-snipe full reload...`);
-  await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-  await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 10000 }).catch(() => {});
+  // Final reload to ensure page + jQuery are fully initialised before snipe.
+  // Skip if we're already within 12s of firstFireTime (reload takes ~3-8s and
+  // would push us past the fire time — page is already primed from pre-warm).
+  const timeToSnipe = msUntil(snipeTime);
+  if (timeToSnipe > 12000) {
+    console.log(`[${ts()}] Final pre-snipe full reload (${Math.round(timeToSnipe/1000)}s to snipe)...`);
+    await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 10000 }).catch(() => {});
+  } else {
+    console.log(`[${ts()}] Skipping final reload — only ${Math.round(timeToSnipe/1000)}s to snipe (page already primed)`);
+  }
 
   // Final pre-snipe probe: one more grid refresh right before the snipe phase.
-  // This gives the freshest possible 3-AJAX chain measurement and confirms
-  // jQuery event handlers are still bound. Also handles the rare case where
-  // the portal opens slightly early.
+  // Skip if we're already within 10s of firstFireTime (probe takes up to 8s).
   let booked = false;
   let fullReloadFallback = false;
 
-  const finalProbe = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment)
-    .catch(() => ({ href: null, ajaxMs: 0 }));
-  if (finalProbe.ajaxMs > 0) {
-    const chainMs = finalProbe.ajaxMs + 1200;
-    if (chainMs > measuredChainMs) measuredChainMs = chainMs;
-    console.log(`[${ts()}] ✅ AJAX chain confirmed (AJAX #1: ${finalProbe.ajaxMs}ms, full chain est. ${chainMs}ms)`);
+  // Use estimated firstFireTime (openTime - preFireMs floor) to decide if probe fits.
+  // Real firstFireTime is recalculated after measuredChainMs is updated by the probe.
+  const timeToEstFirstFire = openTime.getTime() - CONFIG.preFireMs - Date.now();
+  if (timeToEstFirstFire > 10000) {
+    const finalProbe = await triggerGridRefreshAndCheckBookButton(page, CONFIG.targetVenueFragment)
+      .catch(() => ({ href: null, ajaxMs: 0 }));
+    if (finalProbe.ajaxMs > 0) {
+      const chainMs = finalProbe.ajaxMs + 1200;
+      if (chainMs > measuredChainMs) measuredChainMs = chainMs;
+      console.log(`[${ts()}] ✅ AJAX chain confirmed (AJAX #1: ${finalProbe.ajaxMs}ms, full chain est. ${chainMs}ms)`);
+    } else {
+      // Chain didn't fire — reload one more time to re-bind handlers
+      console.log(`[${ts()}] ⚠️  AJAX chain not detected — doing extra reload to re-bind JS handlers...`);
+      await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 10000 }).catch(() => {});
+      console.log(`[${ts()}] ✅ Extra reload done — proceeding to snipe`);
+    }
+    if (finalProbe.href && !booked) {
+      console.log(`[${ts()}] [final-probe] 📡 Book button detected by: ${finalProbe.detectedBy}`);
+      console.log(`[${ts()}] [final-probe] ⚡ BOOK BUTTON VISIBLE — booking immediately!`);
+      booked = await confirmBooking(page, finalProbe.href);
+    }
   } else {
-    // Chain didn't fire — reload one more time to re-bind handlers
-    console.log(`[${ts()}] ⚠️  AJAX chain not detected — doing extra reload to re-bind JS handlers...`);
-    await page.goto(examsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await page.waitForFunction(() => typeof $ !== 'undefined' && $('#schedulelist .entity-grid').length > 0, { timeout: 10000 }).catch(() => {});
-    console.log(`[${ts()}] ✅ Extra reload done — proceeding to snipe`);
-  }
-  if (finalProbe.href && !booked) {
-    console.log(`[${ts()}] [final-probe] 📡 Book button detected by: ${finalProbe.detectedBy}`);
-    console.log(`[${ts()}] [final-probe] ⚡ BOOK BUTTON VISIBLE — booking immediately!`);
-    booked = await confirmBooking(page, finalProbe.href);
+    console.log(`[${ts()}] Skipping final probe — only ${Math.round(timeToEstFirstFire/1000)}s to first fire (going straight to snipe)`);
   }
 
   // Dynamic preFireMs: fire trigger exactly measuredChainMs before 14:30:00
@@ -638,10 +660,13 @@ async function main() {
   //   14:30:00.000  Book button injected into DOM
   //   14:30:00.100  100ms poller catches it → navigate to booking page
   //
-  const dynamicPreFireMs = measuredChainMs > 0
-    ? Math.min(5000, Math.max(CONFIG.preFireMs, measuredChainMs))
+  const measuredAvgMs = gridRefreshSamples.length > 0
+    ? Math.round(gridRefreshSamples.reduce((a, b) => a + b, 0) / gridRefreshSamples.length)
+    : 0;
+  const dynamicPreFireMs = measuredAvgMs > 0
+    ? Math.min(5000, Math.max(CONFIG.preFireMs, measuredAvgMs))
     : CONFIG.preFireMs;
-  console.log(`[${ts()}] ⏱  preFireMs: ${dynamicPreFireMs}ms (measured chain: ${measuredChainMs || 'n/a'}ms, config fallback: ${CONFIG.preFireMs}ms)`);
+  console.log(`[${ts()}] ⏱  preFireMs: ${dynamicPreFireMs}ms (last-3-avg: ${measuredAvgMs || 'n/a'}ms, samples=[${gridRefreshSamples.join(',')}], config fallback: ${CONFIG.preFireMs}ms)`);
   const firstFireTime = new Date(openTime.getTime() - dynamicPreFireMs);
   // Light grid refreshes every 3s until 9s before firstFireTime.
   // Exit with enough headroom for one full reload + one grid refresh below.
@@ -684,7 +709,7 @@ async function main() {
   if (!booked && msUntil(firstFireTime) > 0) await sleep(msUntil(firstFireTime));
 
   // ── STEP 4: RAPID SNIPE ───────────────────────────────────────────────────
-  if (!booked) console.log(`[${ts()}] ══ SNIPE START (${CONFIG.preFireMs}ms pre-fire) ══`);
+  if (!booked) console.log(`[${ts()}] ══ SNIPE START — firing ${dynamicPreFireMs}ms before open (last-3-avg: ${measuredAvgMs || 'n/a'}ms) ══`);
 
   for (let i = 1; !booked && i <= CONFIG.snipeMaxAttempts; i++) {
     const t0 = Date.now();
@@ -705,15 +730,19 @@ async function main() {
         if (lastAjaxMs) console.log(`[${ts()}] [snipe #${i}] grid AJAX took ${lastAjaxMs}ms`);
         if (result.href) console.log(`[${ts()}] [snipe #${i}] 📡 Book button detected by: ${result.detectedBy}`);
       } else {
+        // Full reload fallback — one reload to re-establish page state, then
+        // switch back to fast grid refresh for the next attempt.
         bookHref = await reloadAndCheckBookButton(page, CONFIG.targetVenueFragment, examsUrl);
         if (bookHref) console.log(`[${ts()}] [snipe #${i}] 📡 Book button detected by: full-page-reload`);
+        fullReloadFallback = false;  // recovered — try grid refresh again next cycle
+        console.log(`[${ts()}] [snipe #${i}] Full reload done — switching back to grid refresh for next cycle`);
       }
 
       if (bookHref) {
         console.log(`[${ts()}] [snipe #${i}] 🎯 BOOK LINK FOUND → ${bookHref}`);
         booked = await confirmBooking(page, bookHref);
         if (booked) break;
-        // If confirm failed, fall back to full reload mode for safety
+        // If confirm failed, do one full reload to recover page state
         fullReloadFallback = true;
       } else {
         console.log(`[${ts()}] [snipe #${i}] No Book button yet (${Date.now() - t0}ms)`);
@@ -727,17 +756,12 @@ async function main() {
       const msToOpen  = msUntil(openTime);
       const elapsed   = Date.now() - t0;
 
-      // Smart re-fire: if we're within ±3s of open time, the chain likely
-      // completed just before 14:30:00 (applyExamLogic check failed by <200ms).
-      // Don't wait the full dynamic interval — sleep only until openTime+100ms
-      // so the next trigger fires as close to open as possible.
+      // Smart re-fire: within ±3s of open time, fire the next trigger IMMEDIATELY.
+      // The chain itself (~1200ms at hot-cache speed) acts as the timer — it will
+      // land right at/after 14:30:00. Any sleep here is pure wasted time.
       if (msToOpen > -3000 && msToOpen < CONFIG.snipeIntervalMs) {
-        const wait = Math.max(0, msToOpen + 100);  // wait until 100ms past open
-        if (wait > 0)
-          console.log(`[${ts()}] [snipe #${i}] near open time — re-firing in ${wait}ms (${(msToOpen/1000).toFixed(2)}s to open)`);
-        else
-          console.log(`[${ts()}] [snipe #${i}] past open time — re-firing immediately`);
-        await sleep(wait);  // no jitter — exact timing matters here
+        console.log(`[${ts()}] [snipe #${i}] near/past open — re-firing immediately (${(msToOpen/1000).toFixed(2)}s to open)`);
+        // no sleep — fire right now
       } else {
         // Away from open time: use dynamic interval based on server load
         //   base 3s, extended when AJAX is slow so we don't spam an overloaded server
