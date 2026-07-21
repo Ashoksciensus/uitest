@@ -1,0 +1,99 @@
+[22:38:34.908][fatal] page.waitForURL: Target page, context or browser has been closed
+=========================== logs ===========================
+waiting for navigation to "**mygdc.gdc-uk.org/exams**" until "load"
+============================================================
+[22:38:34.911][fatal] Script crashed but browser is kept open. Press Ctrl+C to exit.
+PS C:\Users\ashok\Downloads\uitest> 
+PS C:\Users\ashok\Downloads\uitest> 
+PS C:\Users\ashok\Downloads\uitest> git pull
+remote: Enumerating objects: 5, done.
+remote: Counting objects: 100% (5/5), done.
+remote: Compressing objects: 100% (3/3), done.
+remote: Total 3 (delta 1), reused 0 (delta 0), pack-reused 0 (from 0)
+Unpacking objects: 100% (3/3), 2.16 KiB | 110.00 KiB/s, done.
+From https://github.com/Ashoksciensus/uitest
+   f4bab49..e15e171  main       -> origin/main
+Updating f4bab49..e15e171
+Fast-forward
+ ore-autobook.js | 103 +++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 94 insertions(+), 9 deletions(-)
+PS C:\Users\ashok\Downloads\uitest> node .\ore-autobook.js
+[06:32:08.066] Booking opens : 21/07/2026, 06:40:00
+[06:32:08.081] Pre-warm start: 06:38:00 (full reload every 8s)
+[06:32:08.082] Snipe start   : 06:39:50 (grid-refresh every 3s)
+[06:32:14.043] Launched Google Chrome ✓
+
+[06:32:15.046] ⚠️  NOT LOGGED IN — please log in manually in the browser window.
+[06:32:15.047]    1. Enter your email and password
+[06:32:15.047]    2. Complete any MFA / email verification code
+[06:32:15.047]    3. Script continues automatically once you reach the exams page.
+
+[06:33:14.293] ✅ On exams page. Waiting for pre-warm phase...
+[06:33:14.295] ⚡ IMPORTANT: Keep this laptop plugged in and screen/sleep disabled until after 14:30 tomorrow.
+[06:33:14.516] ✅ Clock check: -0.5s drift from server (OK)
+[06:33:44.522] [keep-alive #1] Full reload (~5m to pre-warm)...
+[06:33:45.480] [keep-alive #1] Full reload ✓ (~5m to pre-warm)
+[06:34:15.484] [keep-alive #2] Grid refresh (~4m to pre-warm)...
+[06:34:16.947] [keep-alive #2] Grid refresh ✓ (AJAX: 248ms, ~4m to pre-warm)
+[06:34:46.955] [keep-alive #3] Full reload (~4m to pre-warm)...
+[06:34:47.951] [keep-alive #3] Full reload ✓ (~4m to pre-warm)
+[06:35:17.963] [keep-alive #4] Grid refresh (~3m to pre-warm)...
+[06:35:19.447] [keep-alive #4] Grid refresh ✓ (AJAX: 273ms, ~3m to pre-warm)
+[06:35:49.457] [keep-alive #5] Full reload (~3m to pre-warm)...
+[06:35:50.385] [keep-alive #5] Full reload ✓ (~3m to pre-warm)
+[06:36:20.386] [keep-alive #6] Grid refresh (~2m to pre-warm)...
+[06:36:21.838] [keep-alive #6] Grid refresh ✓ (AJAX: 244ms, ~2m to pre-warm)
+[06:36:51.840] [keep-alive #7] Full reload (~2m to pre-warm)...
+[06:36:52.697] [keep-alive #7] Full reload ✓ (~2m to pre-warm)
+[06:37:22.710] [keep-alive #8] Grid refresh (~1m to pre-warm)...
+[06:37:24.152] [keep-alive #8] Grid refresh ✓ (AJAX: 236ms, ~1m to pre-warm)
+[06:37:54.153] [keep-alive #9] Full reload (~1m to pre-warm)...
+[06:37:55.072] [keep-alive #9] Full reload ✓ (~1m to pre-warm)
+[06:38:00.008] ── PRE-WARM phase (alternating full reload / grid refresh every 8s) ──
+[06:38:00.008] [pre-warm] Full page reload (120s until open)...
+[06:38:02.013] [pre-warm] 3-AJAX chain ~1609ms (full reload — excluded from calibration)
+[06:38:10.025] [pre-warm] Grid refresh only (110s until open)...
+[06:38:11.588] [pre-warm] 3-AJAX chain ~1540ms (grid refresh) → samples=[1540] avg=1540ms
+[06:38:19.594] [pre-warm] Full page reload (100s until open)...
+[06:38:21.586] [pre-warm] 3-AJAX chain ~1581ms (full reload — excluded from calibration)
+[06:38:29.586] [pre-warm] Grid refresh only (90s until open)...
+[06:38:31.042] [pre-warm] 3-AJAX chain ~1441ms (grid refresh) → samples=[1540,1441] avg=1491ms
+[06:38:39.044] [pre-warm] Full page reload (81s until open)...
+[06:38:41.027] [pre-warm] 3-AJAX chain ~1568ms (full reload — excluded from calibration)
+[06:38:49.030] [pre-warm] Grid refresh only (71s until open)...
+[06:38:50.469] [pre-warm] 3-AJAX chain ~1424ms (grid refresh) → samples=[1540,1441,1424] avg=1468ms
+[06:38:58.482] [pre-warm] Full page reload (62s until open)...
+[06:39:00.540] [pre-warm] 3-AJAX chain ~1579ms (full reload — excluded from calibration)
+[06:39:08.546] [pre-warm] Grid refresh only (51s until open)...
+[06:39:09.994] [pre-warm] 3-AJAX chain ~1435ms (grid refresh) → samples=[1441,1424,1435] avg=1433ms
+[06:39:18.011] [pre-warm] Full page reload (42s until open)...
+[06:39:19.994] [pre-warm] 3-AJAX chain ~1550ms (full reload — excluded from calibration)
+[06:39:27.999] [pre-warm] Grid refresh only (32s until open)...
+[06:39:29.447] [pre-warm] 3-AJAX chain ~1443ms (grid refresh) → samples=[1424,1435,1443] avg=1434ms
+[06:39:37.448] [pre-warm] Full page reload (23s until open)...
+[06:39:39.509] [pre-warm] 3-AJAX chain ~1615ms (full reload — excluded from calibration)
+[06:39:47.524] [pre-warm] Grid refresh only (12s until open)...
+[06:39:48.979] [pre-warm] 3-AJAX chain ~1447ms (grid refresh) → samples=[1435,1443,1447] avg=1442ms
+[06:39:50.008] Skipping final reload — only 0s to snipe (page already primed)
+[06:39:50.009] Skipping final probe — only 8s to first fire (going straight to snipe)
+[06:39:50.010] ⏱  preFireMs: 1500ms (last-3-avg: 1442ms, samples=[1435,1443,1447], config fallback: 1500ms)
+[06:39:50.010] [pre-snipe] Skipping extra reload — only 8s to first snipe (page already primed from finalProbe)
+[06:39:58.507] ══ SNIPE START — firing 1500ms before open (last-3-avg: 1442ms) ══
+[06:39:58.507] [snipe #1] firing grid refresh...
+[06:39:59.931] [snipe #1] grid AJAX took 207ms
+[06:39:59.931] [snipe #1] No Book button yet (1424ms)
+[06:39:59.931] [snipe #1] near/past open — re-firing immediately (0.07s to open)
+[06:39:59.931] [snipe #2] firing grid refresh...
+[06:40:01.356] [snipe #2] grid AJAX took 209ms
+[06:40:01.356] [snipe #2] No Book button yet (1425ms)
+[06:40:01.356] [snipe #2] near/past open — re-firing immediately (-1.36s to open)
+[06:40:01.356] [snipe #3] firing grid refresh...
+[06:40:02.806] [snipe #3] grid AJAX took 242ms
+[06:40:02.806] [snipe #3] No Book button yet (1450ms)
+[06:40:02.806] [snipe #3] Auto-snipe limit reached (3) — switching to manual mode
+
+[06:40:02.807] ╔════════════════════════════════════════════════════════════╗
+[06:40:02.807] ║   🖐️  MANUAL MODE — Auto-refresh stopped                   ║
+[06:40:02.807] ║   Press F5 in browser to refresh manually                  ║
+[06:40:02.807] ║   Script will AUTO-CLICK Book button if it appears         ║
+[06:40:02.807] ╚════════════════════════════════════════════════════════════╝
