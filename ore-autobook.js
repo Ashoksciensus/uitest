@@ -55,7 +55,8 @@ const CONFIG = {
   // Phase 3: rapid snipe starts this many seconds before open
   snipeLeadSec:         10,                  // 14:29:50  → grid-refresh every 3 s
   snipeIntervalMs:      3_000,               // 3 s between snipe attempts
-  snipeMaxAttempts:     300,                 // 300 × 3 s = 15 min max
+  snipeMaxAttempts:     300,                 // 300 × 3 s = 15 min max (only used if autoSnipeCount=0)
+  autoSnipeCount:       3,                   // auto-refresh this many times, then switch to manual mode
 
   // After grid 'loaded' fires, portal JS makes 2 sequential AJAX calls before
   // injecting the Book button (~895 ms total). We poll every 100 ms until it
@@ -350,7 +351,6 @@ async function confirmBooking(page, bookingHref) {
 
   console.log(`[${ts()}][book] → ${bookingHref}`);
   // Click the Book element immediately — minimum latency.
-  // Screenshot taken concurrently while navigation loads (doesn't delay click).
   const clicked = await page.evaluate((href) => {
     const a = Array.from(document.querySelectorAll('td.action-cell a'))
       .find(el => ['Book', 'Book Now'].includes(el.textContent.trim()) && (el.getAttribute('href') || '').trim());
@@ -360,15 +360,10 @@ async function confirmBooking(page, bookingHref) {
 
   if (clicked) {
     console.log(`[${ts()}][book] Clicked Book element directly ✓`);
-    // Start waiting for navigation, take screenshot in parallel while page loads
-    const navPromise = page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
-    await page.screenshot({ path: 'book-button-found.png', fullPage: false }).catch(() => {});
-    console.log(`[${ts()}][book] 📸 Screenshot saved → book-button-found.png`);
-    await navPromise;
+    await page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
   } else {
     console.log(`[${ts()}][book] Element gone — navigating via href directly`);
     await page.goto(bookingHref, { waitUntil: 'load', timeout: 30000 });
-    await page.screenshot({ path: 'book-button-found.png', fullPage: false }).catch(() => {});
   }
   console.log('');
   console.log(`[${ts()}] ████████████████████████████████████████████████████████`);
@@ -752,6 +747,26 @@ async function main() {
       fullReloadFallback = true;
     }
 
+    // After autoSnipeCount attempts, switch to manual mode (stop auto-refresh)
+    if (!booked && CONFIG.autoSnipeCount > 0 && i >= CONFIG.autoSnipeCount) {
+      console.log(`[${ts()}] [snipe #${i}] Auto-snipe limit reached (${CONFIG.autoSnipeCount}) — switching to manual mode`);
+      const manualBooked = await manualWatchMode(page, CONFIG.targetVenueFragment);
+      if (manualBooked) {
+        // Book button was clicked in manual mode — wait for navigation
+        console.log(`[${ts()}] 🎯 Book button clicked in manual mode!`);
+        await page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
+        console.log('');
+        console.log(`[${ts()}] ████████████████████████████████████████████████████████`);
+        console.log(`[${ts()}] █                                                      █`);
+        console.log(`[${ts()}] █   ✅  BOOKING PAGE LOADED — COMPLETE THE FORM NOW!  █`);
+        console.log(`[${ts()}] █                                                      █`);
+        console.log(`[${ts()}] ████████████████████████████████████████████████████████`);
+        console.log('');
+        booked = true;
+      }
+      break;
+    }
+
     if (!booked && i < CONFIG.snipeMaxAttempts) {
       const msToOpen  = msUntil(openTime);
       const elapsed   = Date.now() - t0;
@@ -780,11 +795,81 @@ async function main() {
   }
 
   if (!booked) {
-    console.warn(`[${ts()}] ⚠️  Did not complete booking. Check booking-page.png.`);
+    console.warn(`[${ts()}] ⚠️  Did not complete booking.`);
   }
 
   console.log(`[${ts()}] Script finished. Browser left open — press Ctrl+C to quit.`);
   await new Promise(() => {}); // keep browser open for manual review / payment
+}
+
+/**
+ * Manual watch mode: stop auto-refreshing but keep watching DOM for Book button.
+ * User presses F5 manually; if Book appears, script auto-clicks it.
+ */
+async function manualWatchMode(page, venueFilter) {
+  console.log('');
+  console.log(`[${ts()}] ╔════════════════════════════════════════════════════════════╗`);
+  console.log(`[${ts()}] ║   🖐️  MANUAL MODE — Auto-refresh stopped                   ║`);
+  console.log(`[${ts()}] ║   Press F5 in browser to refresh manually                  ║`);
+  console.log(`[${ts()}] ║   Script will AUTO-CLICK Book button if it appears         ║`);
+  console.log(`[${ts()}] ╚════════════════════════════════════════════════════════════╝`);
+  console.log('');
+
+  // Set up persistent MutationObserver in the page
+  const booked = await page.evaluate((venueFilter) => {
+    return new Promise((resolve) => {
+      const BOOK_LABELS = ['Book', 'Book Now'];
+
+      const findAndClickBook = () => {
+        let clicked = false;
+        document.querySelectorAll('td.action-cell a').forEach(a => {
+          if (clicked) return;
+          const txt = a.textContent.trim();
+          const href = (a.getAttribute('href') || '').trim();
+          if (!BOOK_LABELS.includes(txt) || !href) return;
+          if (venueFilter) {
+            const row = a.closest('tr');
+            const venue = row?.querySelector('td')?.textContent?.trim()?.toLowerCase() || '';
+            if (!venue.includes(venueFilter.toLowerCase())) return;
+          }
+          console.log('[MANUAL MODE] 🎯 Book button detected — clicking!');
+          a.click();
+          clicked = true;
+        });
+        return clicked;
+      };
+
+      // Check immediately
+      if (findAndClickBook()) {
+        resolve(true);
+        return;
+      }
+
+      // Watch for future changes
+      const observer = new MutationObserver(() => {
+        if (findAndClickBook()) {
+          observer.disconnect();
+          resolve(true);
+        }
+      });
+
+      const target = document.querySelector('#schedulelist') || document.body;
+      observer.observe(target, { childList: true, subtree: true });
+
+      // Also check periodically (backup)
+      const interval = setInterval(() => {
+        if (findAndClickBook()) {
+          clearInterval(interval);
+          observer.disconnect();
+          resolve(true);
+        }
+      }, 500);
+
+      // Never resolve false — keep watching until Book found or user quits
+    });
+  }, venueFilter);
+
+  return booked;
 }
 
 main().catch(err => {
